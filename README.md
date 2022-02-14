@@ -23,6 +23,6 @@ Delete Threat Indicators in Bulk
 	- V1.0
 	
 # Questions ❓ / Issues 🙋‍♂️ / Feedback 🗨
-Post [here](https://github.com/sreedharande/Microsoft-Sentinel-Bulk-Delete-Threat-Indicators/issues).
+Post [here](https://github.com/sreedharande/MS-Sentinel-Bulk-Delete-Threat-Indicators/issues).
 
 Contributions are welcome! 👏
