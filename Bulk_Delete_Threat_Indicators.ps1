@@ -10,7 +10,7 @@
 
     .DESCRIPTION
         It performs the following actions:
-            1. Gets all Threat Indicators
+            1. Gets all Threat Indicators for a particular source filter
             2. Loop through each Threat Indicator and deletes Threat Indicator          
     
     .PARAMETER TenantId
@@ -18,7 +18,7 @@
 
     .NOTES
         AUTHOR: Sreedhar Ande
-        LASTEDIT: 2/13/2022
+        LASTEDIT: 9/12/2022
 
     .EXAMPLE
         .\Bulk_Delete_Threat_Indicators.ps1 -TenantId xxxx
@@ -155,46 +155,160 @@ function Get-RequiredModules {
 
 #region MainFunctions
 function Get-AllThreatIndicators {    
-    $ThreatIndicatorsApi = "https://management.azure.com/subscriptions/$SubscriptionId/resourcegroups/$LogAnalyticsResourceGroup/providers/Microsoft.OperationalInsights/workspaces/$LogAnalyticsWorkspaceName/providers/Microsoft.SecurityInsights/threatIntelligence/main/indicators?api-version=2021-09-01-preview"
-	    		
-    try {        
-        $ThreatIndicatorsResponse = Invoke-RestMethod -Uri $ThreatIndicatorsApi -Method "GET" -Headers $LaAPIHeaders -Verbose        			
-        $ThreatIndicators = $ThreatIndicatorsResponse.value       
+    $ThreatIndicatorsApi = "https://management.azure.com/subscriptions/$SubscriptionId/resourcegroups/$LogAnalyticsResourceGroup/providers/Microsoft.OperationalInsights/workspaces/$LogAnalyticsWorkspaceName/providers/Microsoft.SecurityInsights/threatIntelligence/"
+	$SECURITY_INSIGHTS_API_VERSION = "api-version=2022-07-01-preview"
+    $PAGE_SIZE = "100"
+    $Source = Collect-TISource
+    $getAllIndicatorsWithSourceFilterUri = $ThreatIndicatorsApi + "query?$SECURITY_INSIGHTS_API_VERSION"
+    $getAllIndicatorsPostParameters = @{ "pageSize" = $PAGE_SIZE; "sources" = @($Source) } | ConvertTo-Json    		
+    
+    # This flag checks whether the initial count of indicators in the workspace is already 0 or not
+    $indicatorsFound = $false
 
-        while ($ThreatIndicatorsResponse.nextLink) {
-            $IndicatorsNextLink = $ThreatIndicatorsResponse.nextLink
-            $ThreatIndicatorsResponse = Invoke-RestMethod -Uri $IndicatorsNextLink -Method "GET" -Headers $LaAPIHeaders -UseBasicParsing -Verbose
-            
-            $ThreatIndicators += $ThreatIndicatorsResponse.value        
+    # Total count of indicators fetched for the customer's workspace ,and for the provided source
+    $indicatorsFetched = 0
+
+    # Total count of indicators deleted
+    $indicatorsDeleted = 0
+
+    # We have a max page size of 100 hence at a time, the fetch indicators call can only fetch a list of 100 indicators for any workspace. However, since a workspace can have more than
+    # 100 indicators for a particular source, we need to perform the delete logic for 100 indicators repeatedly, until all indicators have been deleted.
+    while ($true) {
+    try {
+        $response = Invoke-WebRequest -Uri $getAllIndicatorsWithSourceFilterUri -Method POST -Body $getAllIndicatorsPostParameters -Headers $LaAPIHeaders -UseBasicParsing
+        if ($response -eq $null -or $response.StatusCode -ne 200) {            
+            Write-Log -Message "Failed to fetch indicators. Status Code = $($response.StatusCode)" -LogFileName $LogFileName -Severity Information
+            exit 1
         }
-        return $ThreatIndicators
-    } 
-    catch {                    
-        Write-Log -Message "Get-AllThreatIndicators $($_)" -LogFileName $LogFileName -Severity Error		                
-    }    
+    
+        $indicatorList = ($response.Content | ConvertFrom-Json).value
+    }
+    catch {        
+        Write-Log -Message "Failed to get all indicators with the specified source. $($_.Exception)" -LogFileName $LogFileName -Severity Error    
+        exit 1
+    }
+    
+    if ($indicatorList.Count -eq 0) {
+        # If the initial count of indicators in the customer's workspace is already 0, exit.
+        if ($indicatorsFound -eq $false) {
+            Write-Log -Message "No indicators found with source = $Source! Exiting ..." -LogFileName $LogFileName -Severity Error            
+            break
+        }
+        else {
+            Write-Log -Message "Finished querying workspace = $WorkspaceName for indicators with Source = $Source ..." -LogFileName $LogFileName -Severity Information
+            Write-Log -Message "Fetched $indicatorsFetched indicators" -LogFileName $LogFileName -Severity Information
+            Write-Log -Message "Deleted $indicatorsDeleted indicators" -LogFileName $LogFileName -Severity Information
+
+            if ($indicatorsFetched -eq $indicatorsDeleted) {                
+                Write-Log -Message "Successfully deleted all indicators in workspace = $WorkspaceName with Source = $Source" -LogFileName $LogFileName -Severity Information
+            }
+            else {                
+                Write-Log -Message "Please re-run the script to delete remaining indicators or reach out to the script owners if you're facing any issues." -LogFileName $LogFileName -Severity Information
+            }
+            break
+        }
+    }
+
+    $indicatorsFound = $true    
+    Write-Log -Message "Successfully fetched $($indicatorList.Count) indicators for source = $Source. Deleting ..." -LogFileName $LogFileName -Severity Information
+    
+    $indicatorsFetched += $indicatorList.Count
+
+    try {
+        foreach ($indicator in $indicatorList) {
+            $indicatorName = $($indicator).name
+            Write-Host "Deleting indicator with ID: $indicatorName"
+            Write-Log -Message "Deleting indicator with ID: $indicatorName" -LogFileName $LogFileName -Severity Information
+            $deleteIndicatorUri = $ThreatIndicatorsApi + $indicator.name + "?$SECURITY_INSIGHTS_API_VERSION"
+            $response = Invoke-WebRequest -Uri $deleteIndicatorUri -Method DELETE -Headers $LaAPIHeaders -UseBasicParsing
+            if ($response -eq $null -or $response.StatusCode -ne 200) {                
+                Write-Log -Message "Failed to delete indicator $indicator.name. Status Code = $($response.StatusCode)" -LogFileName $LogFileName -Severity Information
+                break
+            }
+            $indicatorsDeleted++
+        }
+    }
+    catch {
+        Write-Log -Message "Failed to delete indicator info: $($_.Exception)" -LogFileName $LogFileName -Severity Information        
+    }
+}
 }
 
-function Delete-ThreatIndicators {
-    [CmdletBinding()]
-    param (        
-        [parameter(Mandatory = $true)] $AllThreatIndicators		
-    )
+function Collect-TISource {
+    Add-Type -AssemblyName System.Windows.Forms
+    Add-Type -AssemblyName System.Drawing
+    
+    $form = New-Object System.Windows.Forms.Form
+    $form.Text = 'TI:IoC'
+    $form.Size = New-Object System.Drawing.Size(380,250)
+    $form.StartPosition = 'CenterScreen'
 
-    foreach($ThreatIndicator in $AllThreatIndicators) {   
-        Write-Log "Deleting Threat Indicator $($ThreatIndicator.DisplayName)" -LogFileName $LogFileName -Severity Information
-        $ThreatIndicatorsDeleteApi = "https://management.azure.com/subscriptions/$SubscriptionId/resourcegroups/$LogAnalyticsResourceGroup/providers/Microsoft.OperationalInsights/workspaces/$LogAnalyticsWorkspaceName/providers/Microsoft.SecurityInsights/threatIntelligence/main/indicators/$($ThreatIndicator.Name)?api-version=2021-09-01-preview"
-        try {        
-            Invoke-RestMethod -Uri $ThreatIndicatorsDeleteApi -Method "DELETE" -Headers $LaAPIHeaders            
-        } 
-        catch {                    
-            Write-Log -Message "Delete-ThreatIndicators $($_)" -LogFileName $LogFileName -Severity Error		                
+    $okButton = New-Object System.Windows.Forms.Button
+    $okButton.Location = New-Object System.Drawing.Point(90,130)
+    $okButton.Size = New-Object System.Drawing.Size(75,30)
+    $okButton.Text = 'OK'
+    $okButton.DialogResult = [System.Windows.Forms.DialogResult]::OK
+    $form.AcceptButton = $okButton
+    $form.Controls.Add($okButton)
+    $okButton.Enabled = $false    
+
+    $cancelButton = New-Object System.Windows.Forms.Button
+    $cancelButton.Location = New-Object System.Drawing.Point(170,130)
+    $cancelButton.Size = New-Object System.Drawing.Size(75,30)
+    $cancelButton.Text = 'Cancel'
+    $cancelButton.DialogResult = [System.Windows.Forms.DialogResult]::Cancel
+    $form.CancelButton = $cancelButton
+    $form.Controls.Add($cancelButton)
+
+    $label = New-Object System.Windows.Forms.Label
+    $label.Location = New-Object System.Drawing.Point(10,20)
+    $label.Size = New-Object System.Drawing.Size(350,60)
+    $label.Text = "Enter valid TI Source"
+    $form.Controls.Add($label)
+
+    $textBox = New-Object System.Windows.Forms.TextBox
+    $textBox.Location = New-Object System.Drawing.Point(10,90)
+    $textBox.Size = New-Object System.Drawing.Size(260,60)
+    $textBox.TabIndex = 1
+    $form.Controls.Add($textBox)  
+    
+    $textBox.Add_TextChanged({       
+        
+        if ($this.Text -match '[a-z]') {         
+            $okButton.Enabled = $true
+            $ErrorProvider.Clear()
         }
-    }   
+        else {
+            $ErrorProvider.SetError($textBox, "Enter Valid TI Source")  
+            $okButton.Enabled = $false            
+        } 
+    }) 
+
+    $ErrorProvider = New-Object System.Windows.Forms.ErrorProvider
+    $form.Add_Shown({$form.Activate()})
+    $form.Add_Shown({$textBox.Select()})
+    $form.Topmost = $true    
+    $result = $form.ShowDialog()
+
+    if ($result -eq [System.Windows.Forms.DialogResult]::OK)
+    {
+        $tiSource = $textBox.Text.Trim()        
+        return $tiSource  
+    }
+    else {
+        exit
+    }
 }
 
 #endregion
 
-#region DriverProgram
+#region 
+# Check Powershell version, needs to be 5 or higher
+if ($host.Version.Major -lt 5) {
+    Write-Log "Supported PowerShell version for this script is 5 or above" -LogFileName $LogFileName -Severity Error    
+    exit
+}
+
 $AzModulesQuestion = "Do you want to update required Az Modules to latest version?"
 $AzModulesQuestionChoices = New-Object Collections.ObjectModel.Collection[Management.Automation.Host.ChoiceDescription]
 $AzModulesQuestionChoices.Add((New-Object Management.Automation.Host.ChoiceDescription -ArgumentList '&Yes'))
@@ -209,17 +323,13 @@ else {
     $UpdateAzModules = $false
 }
 
+[System.Net.ServicePointManager]::SecurityProtocol = [System.Net.SecurityProtocolType]::Tls12
 Get-RequiredModules("Az.Accounts")
 Get-RequiredModules("Az.OperationalInsights")
 
 $TimeStamp = Get-Date -Format yyyyMMdd_HHmmss 
 $LogFileName = '{0}_{1}.csv' -f "Bulk_Delete_Threat_Indicators", $TimeStamp
 
-# Check Powershell version, needs to be 5 or higher
-if ($host.Version.Major -lt 5) {
-    Write-Log "Supported PowerShell version for this script is 5 or above" -LogFileName $LogFileName -Severity Error    
-    exit
-}
 
 #disconnect exiting connections and clearing contexts.
 Write-Log "Clearing existing Azure connection" -LogFileName $LogFileName -Severity Information
@@ -269,8 +379,7 @@ foreach($CurrentSubscription in $GetSubscriptions)
                 $LogAnalyticsWorkspaceName = $LAW.Name
                 $LogAnalyticsResourceGroup = $LAW.ResourceGroupName                            
                 
-                $ThreatIndicators = Get-AllThreatIndicators
-                Delete-ThreatIndicators -AllThreatIndicators $ThreatIndicators
+                $ThreatIndicators = Get-AllThreatIndicators                
             }                  
 
         } 	

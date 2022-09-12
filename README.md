@@ -19,8 +19,12 @@ Delete Threat Indicators in Bulk
    .\Bulk_Delete_Threat_Indicators.ps1 -TenantID xxxx `
                         
    ```
-4. Release
-	- V1.0
+4. Enter TI Source
+
+5. This script will retreive a max page size of 100 at a time, the fetch indicators call can only fetch a list of 100 indicators for any workspace. However, since a workspace can have more than 100 indicators for a particular source, it deletes 100 indicators repeatedly, until all indicators have been deleted.
+	
+
+
 	
 # Questions ❓ / Issues 🙋‍♂️ / Feedback 🗨
 Post [here](https://github.com/sreedharande/Microsoft-Sentinel-Bulk-Delete-Threat-Indicators/issues).
