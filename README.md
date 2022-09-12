@@ -3,7 +3,7 @@ Delete Threat Indicators in Bulk
 
 # How to use
 1. Download the Tool  
-   [![Download](./images/Download.png)](https://github.com/sreedharande/Microsoft-Sentinel-Bulk-Delete-Threat-Indicators/archive/refs/heads/main.zip)
+   [![Download](./images/Download.png)](https://github.com/sreedharande/MS-Sentinel-Bulk-Delete-Threat-Indicators/archive/refs/heads/main.zip)
 
 2. Extract the folder and open "Bulk_Delete_Threat_Indicators.ps1" either in Visual Studio Code/PowerShell(Admin)
 
@@ -27,6 +27,6 @@ Delete Threat Indicators in Bulk
 
 	
 # Questions ❓ / Issues 🙋‍♂️ / Feedback 🗨
-Post [here](https://github.com/sreedharande/Microsoft-Sentinel-Bulk-Delete-Threat-Indicators/issues).
+Post [here](https://github.com/sreedharande/MS-Sentinel-Bulk-Delete-Threat-Indicators/issues).
 
 Contributions are welcome! 👏
