@@ -175,7 +175,7 @@ function Get-AllThreatIndicators {
     # 100 indicators for a particular source, we need to perform the delete logic for 100 indicators repeatedly, until all indicators have been deleted.
     while ($true) {
     try {
-        $response = Invoke-WebRequest -Uri $getAllIndicatorsWithSourceFilterUri -Method POST -Body $getAllIndicatorsPostParameters -Headers $LaAPIHeaders -UseBasicParsing
+        $response = Invoke-AzRestMethod -Uri $getAllIndicatorsWithSourceFilterUri -Method POST -Payload $getAllIndicatorsPostParameters
         if ($response -eq $null -or $response.StatusCode -ne 200) {            
             Write-Log -Message "Failed to fetch indicators. Status Code = $($response.StatusCode)" -LogFileName $LogFileName -Severity Information
             exit 1
@@ -220,7 +220,7 @@ function Get-AllThreatIndicators {
             Write-Host "Deleting indicator with ID: $indicatorName"
             Write-Log -Message "Deleting indicator with ID: $indicatorName" -LogFileName $LogFileName -Severity Information
             $deleteIndicatorUri = $ThreatIndicatorsApi + $indicator.name + "?$SECURITY_INSIGHTS_API_VERSION"
-            $response = Invoke-WebRequest -Uri $deleteIndicatorUri -Method DELETE -Headers $LaAPIHeaders -UseBasicParsing
+            $response = Invoke-AzRestMethod -Uri $deleteIndicatorUri -Method DELETE
             if ($response -eq $null -or $response.StatusCode -ne 200) {                
                 Write-Log -Message "Failed to delete indicator $indicator.name. Status Code = $($response.StatusCode)" -LogFileName $LogFileName -Severity Information
                 break
@@ -352,11 +352,6 @@ catch {
     Write-Log "Error When trying to connect to tenant : $($_)" -LogFileName $LogFileName -Severity Error
     exit    
 }
-
-$AzureAccessToken = (Get-AzAccessToken).Token            
-$LaAPIHeaders = New-Object "System.Collections.Generic.Dictionary[[String],[String]]"
-$LaAPIHeaders.Add("Content-Type", "application/json")
-$LaAPIHeaders.Add("Authorization", "Bearer $AzureAccessToken")
 
 #loop through each selected subscription.. 
 foreach($CurrentSubscription in $GetSubscriptions)
