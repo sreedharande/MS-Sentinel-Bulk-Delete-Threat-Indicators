@@ -35,6 +35,33 @@ param(
       
 #region HelperFunctions
 
+function Split-Collection {
+    [CmdletBinding()]
+    param(
+        [Parameter(ValueFromPipeline = $true, ValueFromPipelineByPropertyName = $true)] $Collection,
+        [Parameter(Mandatory = $true)][ValidateRange(1, 247483647)][int] $Count)
+    begin {
+        $Ctr = 0
+        $Array = @()
+        $TempArray = @()
+    }
+    process {
+        foreach ($e in $Collection) {
+            if (++$Ctr -eq $Count) {
+                $Ctr = 0
+                $Array += , @($TempArray + $e)
+                $TempArray = @()
+                continue
+            }
+            $TempArray += $e
+        }
+    }
+    end {
+        if ($TempArray) { $Array += , $TempArray }
+        $Array
+    }
+}
+
 function Write-Log {
     <#
     .DESCRIPTION 
@@ -114,7 +141,7 @@ function Get-RequiredModules {
         else {
             if ($UpdateAzModules) {
                 Write-Log -Message "Checking updates for module $Module" -LogFileName $LogFileName -Severity Information
-                $currentVersion = [Version](Get-InstalledModule | Where-Object {$_.Name -eq $Module}).Version
+                $currentVersion = [Version](Get-InstalledModule | Where-Object { $_.Name -eq $Module }).Version
                 # Get latest version from gallery
                 $latestVersion = [Version](Find-Module -Name $Module).Version
                 if ($currentVersion -ne $latestVersion) {
@@ -156,12 +183,13 @@ function Get-RequiredModules {
 #region MainFunctions
 function Get-AllThreatIndicators {    
     $ThreatIndicatorsApi = "https://management.azure.com/subscriptions/$SubscriptionId/resourcegroups/$LogAnalyticsResourceGroup/providers/Microsoft.OperationalInsights/workspaces/$LogAnalyticsWorkspaceName/providers/Microsoft.SecurityInsights/threatIntelligence/"
-	$SECURITY_INSIGHTS_API_VERSION = "api-version=2022-07-01-preview"
+    $SECURITY_INSIGHTS_API_VERSION = "api-version=2022-07-01-preview"
     $PAGE_SIZE = "100"
     $Source = Collect-TISource
     $getAllIndicatorsWithSourceFilterUri = $ThreatIndicatorsApi + "query?$SECURITY_INSIGHTS_API_VERSION"
-    $getAllIndicatorsPostParameters = @{ "pageSize" = $PAGE_SIZE; "sources" = @($Source) } | ConvertTo-Json    		
-    
+    $getAllIndicatorsPostParameters = @{ "pageSize" = $PAGE_SIZE; "sources" = @($Source) } | ConvertTo-Json
+    $bulkApi = "https://management.azure.com/batch?api-version=2020-06-01"
+
     # This flag checks whether the initial count of indicators in the workspace is already 0 or not
     $indicatorsFound = $false
 
@@ -171,67 +199,104 @@ function Get-AllThreatIndicators {
     # Total count of indicators deleted
     $indicatorsDeleted = 0
 
-    # We have a max page size of 100 hence at a time, the fetch indicators call can only fetch a list of 100 indicators for any workspace. However, since a workspace can have more than
-    # 100 indicators for a particular source, we need to perform the delete logic for 100 indicators repeatedly, until all indicators have been deleted.
+    # We have a max page size of 100 hence at a time, the fetch indicators call can only fetch a list of 100 indicators for any workspace. However, since the bulk
+    # API can only support 20 requests in one single request we search for the first 20 results. Because a workspace can also have more than 100 indicators we will
+    # loop untill we finish.
     while ($true) {
-    try {
-        $response = Invoke-WebRequest -Uri $getAllIndicatorsWithSourceFilterUri -Method POST -Body $getAllIndicatorsPostParameters -Headers $LaAPIHeaders -UseBasicParsing
-        if ($response -eq $null -or $response.StatusCode -ne 200) {            
-            Write-Log -Message "Failed to fetch indicators. Status Code = $($response.StatusCode)" -LogFileName $LogFileName -Severity Information
+        try {
+            $response = Invoke-AzRestMethod -Uri $getAllIndicatorsWithSourceFilterUri -Method POST -Payload $getAllIndicatorsPostParameters
+            if ($response -eq $null -or $response.StatusCode -ne 200) {            
+                Write-Log -Message "Failed to fetch indicators. Status Code = $($response.StatusCode)" -LogFileName $LogFileName -Severity Information
+                exit 1
+            }
+    
+            $indicatorList = ($response.Content | ConvertFrom-Json).value
+        }
+        catch {        
+            Write-Log -Message "Failed to get all indicators with the specified source. $($_.Exception)" -LogFileName $LogFileName -Severity Error    
             exit 1
         }
     
-        $indicatorList = ($response.Content | ConvertFrom-Json).value
-    }
-    catch {        
-        Write-Log -Message "Failed to get all indicators with the specified source. $($_.Exception)" -LogFileName $LogFileName -Severity Error    
-        exit 1
-    }
-    
-    if ($indicatorList.Count -eq 0) {
-        # If the initial count of indicators in the customer's workspace is already 0, exit.
-        if ($indicatorsFound -eq $false) {
-            Write-Log -Message "No indicators found with source = $Source! Exiting ..." -LogFileName $LogFileName -Severity Error            
-            break
-        }
-        else {
-            Write-Log -Message "Finished querying workspace = $WorkspaceName for indicators with Source = $Source ..." -LogFileName $LogFileName -Severity Information
-            Write-Log -Message "Fetched $indicatorsFetched indicators" -LogFileName $LogFileName -Severity Information
-            Write-Log -Message "Deleted $indicatorsDeleted indicators" -LogFileName $LogFileName -Severity Information
-
-            if ($indicatorsFetched -eq $indicatorsDeleted) {                
-                Write-Log -Message "Successfully deleted all indicators in workspace = $WorkspaceName with Source = $Source" -LogFileName $LogFileName -Severity Information
-            }
-            else {                
-                Write-Log -Message "Please re-run the script to delete remaining indicators or reach out to the script owners if you're facing any issues." -LogFileName $LogFileName -Severity Information
-            }
-            break
-        }
-    }
-
-    $indicatorsFound = $true    
-    Write-Log -Message "Successfully fetched $($indicatorList.Count) indicators for source = $Source. Deleting ..." -LogFileName $LogFileName -Severity Information
-    
-    $indicatorsFetched += $indicatorList.Count
-
-    try {
-        foreach ($indicator in $indicatorList) {
-            $indicatorName = $($indicator).name
-            Write-Host "Deleting indicator with ID: $indicatorName"
-            Write-Log -Message "Deleting indicator with ID: $indicatorName" -LogFileName $LogFileName -Severity Information
-            $deleteIndicatorUri = $ThreatIndicatorsApi + $indicator.name + "?$SECURITY_INSIGHTS_API_VERSION"
-            $response = Invoke-WebRequest -Uri $deleteIndicatorUri -Method DELETE -Headers $LaAPIHeaders -UseBasicParsing
-            if ($response -eq $null -or $response.StatusCode -ne 200) {                
-                Write-Log -Message "Failed to delete indicator $indicator.name. Status Code = $($response.StatusCode)" -LogFileName $LogFileName -Severity Information
+        if ($indicatorList.Count -eq 0) {
+            # If the initial count of indicators in the customer's workspace is already 0, exit.
+            if ($indicatorsFound -eq $false) {
+                Write-Log -Message "No indicators found with source = $Source! Exiting ..." -LogFileName $LogFileName -Severity Error            
                 break
             }
-            $indicatorsDeleted++
+            else {
+                Write-Log -Message "Finished querying workspace = $WorkspaceName for indicators with Source = $Source ..." -LogFileName $LogFileName -Severity Information
+                Write-Log -Message "Fetched $indicatorsFetched indicators" -LogFileName $LogFileName -Severity Information
+                Write-Log -Message "Deleted $indicatorsDeleted indicators" -LogFileName $LogFileName -Severity Information
+
+                if ($indicatorsFetched -eq $indicatorsDeleted) {                
+                    Write-Log -Message "Successfully deleted all indicators in workspace = $WorkspaceName with Source = $Source" -LogFileName $LogFileName -Severity Information
+                }
+                else {                
+                    Write-Log -Message "Please re-run the script to delete remaining indicators or reach out to the script owners if you're facing any issues." -LogFileName $LogFileName -Severity Information
+                }
+                break
+            }
+        }
+
+        $indicatorsFound = $true    
+        Write-Log -Message "Successfully fetched $($indicatorList.Count) indicators for source = $Source. Deleting ..." -LogFileName $LogFileName -Severity Information
+    
+        $indicatorsFetched += $indicatorList.Count
+
+        try {
+            if($indicatorList.Count -le 20)
+            {
+                $indicatorChunks = @($indicatorList)
+            }
+            else
+            {
+                $indicatorChunks = $indicatorList | Split-Collection -Count 20
+            }
+            
+            foreach ($indicatorChunk in $indicatorChunks) {
+                $bulkDeletePayload = @{"requests" = (New-Object System.Collections.ArrayList) }
+                $totalDels=$indicatorChunk.Count
+                foreach ($indicator in $indicatorChunk) {
+                    $indicatorName = $($indicator).name
+                    Write-Log -Message "Preparing indicator with ID: ($indicatorName) for deleteion" -LogFileName $LogFileName -Severity Information
+                    $deleteIndicatorUri = $ThreatIndicatorsApi + $indicator.name + "?$SECURITY_INSIGHTS_API_VERSION"
+                    $bulkDeleteRequest = @{"url" = $deleteIndicatorUri; "httpMethod" = "DELETE" }
+                    $bulkDeletePayload.requests.Add($bulkDeleteRequest)
+                }
+                $bulkDeletePayloadJson = $bulkDeletePayload | ConvertTo-Json
+                $response = Invoke-AzRestMethod -Uri $bulkApi -Payload $bulkDeletePayloadJson -Method POST
+                $bulkDeletePayload = @{"requests" = (New-Object System.Collections.ArrayList) }
+                if ($response -eq $null -or $response.StatusCode -ne 200) {                
+                    Write-Log -Message "Failed to bulk delete indicators. Status Code = $($response.StatusCode)" -LogFileName $LogFileName -Severity Information
+                    Write-Log -Message $response.Content -LogFileName $LogFileName -Severity Information
+                    break
+                }
+                $responseContent = $response.Content | ConvertFrom-Json
+                $delFailures = 0
+                $index = 0
+                $failure = $false
+                foreach ($responseItem in $responseContent.responses) {
+                    if ($responseItem.httpStatusCode -ne "200") {
+                        $failure = $true
+                        $indicatorId = $indicatorChunk[$index].name
+                        $delFailures++
+                        Write-Log -Message "Failed to delete indicator with ID ($indicatorId). Status Code = $($responseItem.httpStatusCode)" -LogFileName $LogFileName -Severity Information
+                    }
+                    $index++
+                }
+                $totalDels -= $delFailures
+                $indicatorsDeleted += $totalDels
+                if ($failure) {
+                    Write-Log -Message "Successfully deleted $($totalDels) and failed $($delFailures) indicators" -LogFileName $LogFileName -Severity Information
+                    continue
+                }
+                Write-Log -Message "Successfully deleted all $($indicatorChunk.Count) indicators" -LogFileName $LogFileName -Severity Information
+            }
+        }
+        catch {
+            Write-Log -Message "Failed to delete indicator info: $($_.Exception)" -LogFileName $LogFileName -Severity Information        
         }
     }
-    catch {
-        Write-Log -Message "Failed to delete indicator info: $($_.Exception)" -LogFileName $LogFileName -Severity Information        
-    }
-}
 }
 
 function Collect-TISource {
@@ -240,12 +305,12 @@ function Collect-TISource {
     
     $form = New-Object System.Windows.Forms.Form
     $form.Text = 'TI:IoC'
-    $form.Size = New-Object System.Drawing.Size(380,250)
+    $form.Size = New-Object System.Drawing.Size(380, 250)
     $form.StartPosition = 'CenterScreen'
 
     $okButton = New-Object System.Windows.Forms.Button
-    $okButton.Location = New-Object System.Drawing.Point(90,130)
-    $okButton.Size = New-Object System.Drawing.Size(75,30)
+    $okButton.Location = New-Object System.Drawing.Point(90, 130)
+    $okButton.Size = New-Object System.Drawing.Size(75, 30)
     $okButton.Text = 'OK'
     $okButton.DialogResult = [System.Windows.Forms.DialogResult]::OK
     $form.AcceptButton = $okButton
@@ -253,45 +318,44 @@ function Collect-TISource {
     $okButton.Enabled = $false    
 
     $cancelButton = New-Object System.Windows.Forms.Button
-    $cancelButton.Location = New-Object System.Drawing.Point(170,130)
-    $cancelButton.Size = New-Object System.Drawing.Size(75,30)
+    $cancelButton.Location = New-Object System.Drawing.Point(170, 130)
+    $cancelButton.Size = New-Object System.Drawing.Size(75, 30)
     $cancelButton.Text = 'Cancel'
     $cancelButton.DialogResult = [System.Windows.Forms.DialogResult]::Cancel
     $form.CancelButton = $cancelButton
     $form.Controls.Add($cancelButton)
 
     $label = New-Object System.Windows.Forms.Label
-    $label.Location = New-Object System.Drawing.Point(10,20)
-    $label.Size = New-Object System.Drawing.Size(350,60)
+    $label.Location = New-Object System.Drawing.Point(10, 20)
+    $label.Size = New-Object System.Drawing.Size(350, 60)
     $label.Text = "Enter valid TI Source"
     $form.Controls.Add($label)
 
     $textBox = New-Object System.Windows.Forms.TextBox
-    $textBox.Location = New-Object System.Drawing.Point(10,90)
-    $textBox.Size = New-Object System.Drawing.Size(260,60)
+    $textBox.Location = New-Object System.Drawing.Point(10, 90)
+    $textBox.Size = New-Object System.Drawing.Size(260, 60)
     $textBox.TabIndex = 1
     $form.Controls.Add($textBox)  
     
     $textBox.Add_TextChanged({       
         
-        if ($this.Text -match '[a-z]') {         
-            $okButton.Enabled = $true
-            $ErrorProvider.Clear()
-        }
-        else {
-            $ErrorProvider.SetError($textBox, "Enter Valid TI Source")  
-            $okButton.Enabled = $false            
-        } 
-    }) 
+            if ($this.Text -match '[a-z]') {         
+                $okButton.Enabled = $true
+                $ErrorProvider.Clear()
+            }
+            else {
+                $ErrorProvider.SetError($textBox, "Enter Valid TI Source")  
+                $okButton.Enabled = $false            
+            } 
+        }) 
 
     $ErrorProvider = New-Object System.Windows.Forms.ErrorProvider
-    $form.Add_Shown({$form.Activate()})
-    $form.Add_Shown({$textBox.Select()})
+    $form.Add_Shown({ $form.Activate() })
+    $form.Add_Shown({ $textBox.Select() })
     $form.Topmost = $true    
     $result = $form.ShowDialog()
 
-    if ($result -eq [System.Windows.Forms.DialogResult]::OK)
-    {
+    if ($result -eq [System.Windows.Forms.DialogResult]::OK) {
         $tiSource = $textBox.Text.Trim()        
         return $tiSource  
     }
@@ -338,7 +402,7 @@ $null = Disconnect-AzAccount -ContextName 'MyAzContext' -ErrorAction SilentlyCon
     
 Write-Log "Clearing existing Azure context `n" -LogFileName $LogFileName -Severity Information
     
-get-azcontext -ListAvailable | ForEach-Object{$_ | remove-azcontext -Force -Verbose | Out-Null} #remove all connected content
+get-azcontext -ListAvailable | ForEach-Object { $_ | remove-azcontext -Force -Verbose | Out-Null } #remove all connected content
     
 Write-Log "Clearing of existing connection and context completed." -LogFileName $LogFileName -Severity Information
 Try {
@@ -346,36 +410,29 @@ Try {
     Connect-AzAccount -Tenant $TenantID -ContextName 'MyAzContext' -Force -ErrorAction Stop
         
     #Select subscription to build
-    $GetSubscriptions = Get-AzSubscription -TenantId $TenantID | Where-Object {($_.state -eq 'enabled') } | Out-GridView -Title "Select Subscription to Use" -PassThru       
+    $GetSubscriptions = Get-AzSubscription -TenantId $TenantID | Where-Object { ($_.state -eq 'enabled') } | Out-GridView -Title "Select Subscription to Use" -PassThru       
 }
 catch {    
     Write-Log "Error When trying to connect to tenant : $($_)" -LogFileName $LogFileName -Severity Error
     exit    
 }
 
-$AzureAccessToken = (Get-AzAccessToken).Token            
-$LaAPIHeaders = New-Object "System.Collections.Generic.Dictionary[[String],[String]]"
-$LaAPIHeaders.Add("Content-Type", "application/json")
-$LaAPIHeaders.Add("Authorization", "Bearer $AzureAccessToken")
-
 #loop through each selected subscription.. 
-foreach($CurrentSubscription in $GetSubscriptions)
-{
-    Try 
-    {
+foreach ($CurrentSubscription in $GetSubscriptions) {
+    Try {
         #Set context for subscription being built
         $null = Set-AzContext -Subscription $CurrentSubscription.id
         $SubscriptionId = $CurrentSubscription.id
         Write-Log "Working in Subscription: $($CurrentSubscription.Name)" -LogFileName $LogFileName -Severity Information
 
         $LAWs = Get-AzOperationalInsightsWorkspace | Where-Object { $_.ProvisioningState -eq "Succeeded" } | Select-Object -Property Name, ResourceGroupName, Location | Out-GridView -Title "Select Log Analytics workspace" -PassThru 
-        if($null -eq $LAWs) {
+        if ($null -eq $LAWs) {
             Write-Log "No Log Analytics workspace found..." -LogFileName $LogFileName -Severity Error 
         }
         else {
             Write-Log "Listing Log Analytics workspace" -LogFileName $LogFileName -Severity Information
                         
-            foreach($LAW in $LAWs) {                
+            foreach ($LAW in $LAWs) {                
                 $LogAnalyticsWorkspaceName = $LAW.Name
                 $LogAnalyticsResourceGroup = $LAW.ResourceGroupName                            
                 
@@ -384,8 +441,7 @@ foreach($CurrentSubscription in $GetSubscriptions)
 
         } 	
     }
-    catch [Exception]
-    { 
+    catch [Exception] { 
         Write-Log $_ -LogFileName $LogFileName -Severity Error                         		
     }		 
 }
